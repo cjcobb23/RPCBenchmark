@@ -1,14 +1,15 @@
 
-#include <optional>
-#include <boost/asio/connect.hpp>
 #include <boost/asio.hpp>
+#include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <condition_variable>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <json/json.h>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -25,7 +26,7 @@ main(int argc, char** argv)
     try
     {
         // Check command line arguments.
-        if (argc != 5)
+        if (argc != 5 and argc != 6)
         {
             std::cerr << "Usage: websocket-client-sync <host> <port> \n"
                       << "Example:\n"
@@ -37,6 +38,13 @@ main(int argc, char** argv)
         auto const port = argv[2];
         size_t numTxns = std::atol(argv[3]);
         size_t numReaders = std::atol(argv[4]);
+        bool readFromFile = false;
+        if (argc == 6)
+        {
+            std::ifstream f(argv[5]);
+            readFromFile = f.good();
+            f.close();
+        }
 
         // The io_context is required for all I/O
         net::io_context ioc;
@@ -77,45 +85,67 @@ main(int argc, char** argv)
         request["ledger_index"] = "validated";
         std::vector<Json::Value> hashes;
 
-        while (hashes.size() < numTxns)
+        if (readFromFile)
         {
-            // request["ledger_index"] = "validated";
-
-            Json::StreamWriterBuilder writer;
-
-            // Send the message
-            ws.write(net::buffer(Json::writeString(writer, request)));
-            std::cout << "sent message" << std::endl;
-
-            // This buffer will hold the incoming message
-            beast::flat_buffer buffer;
-
-            // Read a message into our buffer
-            ws.read(buffer);
-
-            Json::CharReaderBuilder builder;
-            Json::CharReader* reader{builder.newCharReader()};
-
-            Json::Value response;
-            const char* data = static_cast<const char*>(buffer.data().data());
-            const char* dataEnd = data + buffer.data().size();
-            reader->parse(data, dataEnd, &response, nullptr);
-
-            // std::cout << "got message : " << response << std::endl;
-
-            request["ledger_index"] =
-                std::stol(
-                    response["result"]["ledger"]["ledger_index"].asString()) -
-                1;
-
-            for (auto& jv : response["result"]["ledger"]["transactions"])
+            std::ifstream f(argv[5]);
+            while (f.good())
             {
-                hashes.push_back(jv);
+                std::string line;
+                std::getline(f, line);
+                if(line.empty())
+                    continue;
+                line = line.substr(1, line.size()-2);
+                std::cout << line << std::endl;
+                hashes.emplace_back(line);
             }
-            std::cout << hashes.size() << std::endl;
+            f.close();
         }
-        std::cout << "gathered txns" << std::endl;
+        else
+        {
+            while (hashes.size() < numTxns)
+            {
+                // request["ledger_index"] = "validated";
 
+                Json::StreamWriterBuilder writer;
+
+                // Send the message
+                ws.write(net::buffer(Json::writeString(writer, request)));
+                std::cout << "sent message" << std::endl;
+
+                // This buffer will hold the incoming message
+                beast::flat_buffer buffer;
+
+                // Read a message into our buffer
+                ws.read(buffer);
+
+                Json::CharReaderBuilder builder;
+                Json::CharReader* reader{builder.newCharReader()};
+
+                Json::Value response;
+                const char* data =
+                    static_cast<const char*>(buffer.data().data());
+                const char* dataEnd = data + buffer.data().size();
+                reader->parse(data, dataEnd, &response, nullptr);
+
+                // std::cout << "got message : " << response << std::endl;
+
+                request["ledger_index"] =
+                    std::stol(response["result"]["ledger"]["ledger_index"]
+                                  .asString()) -
+                    1;
+
+                for (auto& jv : response["result"]["ledger"]["transactions"])
+                {
+                    hashes.push_back(jv);
+                }
+                std::cout << hashes.size() << std::endl;
+            }
+        }
+        std::cout << "gathered " << hashes.size() << "txns" << std::endl;
+
+        std::ofstream myFile;
+        if(!readFromFile and argc > 5)
+            myFile.open("hashes.txt");
         std::vector<Json::Value> requests;
         for (auto& tx : hashes)
         {
@@ -123,7 +153,11 @@ main(int argc, char** argv)
             req["command"] = "tx";
             req["transaction"] = tx;
             requests.push_back(req);
+            if(!readFromFile and argc > 5)
+                myFile << tx << '\n';
         }
+        if(myFile.is_open())
+            myFile.close();
 
         struct Reader
         {
@@ -137,7 +171,7 @@ main(int argc, char** argv)
             std::mutex mtx;
             std::condition_variable cv;
             std::atomic_bool connected{false};
-                tcp::resolver resolver;
+            tcp::resolver resolver;
             Reader(
                 size_t offset,
                 size_t incr,
@@ -152,25 +186,22 @@ main(int argc, char** argv)
                 , ioc(ioc)
                 , ws(ioc)
                 , counter(counter)
-                  , resolver(ioc)
+                , resolver(ioc)
             {
                 // These objects perform our I/O
-
 
                 std::cout << "starting callback" << std::endl;
 
                 resolver.async_resolve(
                     host, port, [this, host](auto ec, auto results) {
-
-                                    std::cout << ec << std::endl;
-                    std::cout << "resolved" << std::endl;
+                        std::cout << ec << std::endl;
+                        std::cout << "resolved" << std::endl;
                         boost::beast::get_lowest_layer(ws).expires_after(
                             std::chrono::seconds(30));
                         boost::beast::get_lowest_layer(ws).async_connect(
                             results, [this, host](auto ec, auto ep) {
-
-                                    std::cout << ec << std::endl;
-                            std::cout << "connected" << std::endl;
+                                std::cout << ec << std::endl;
+                                std::cout << "connected" << std::endl;
                                 boost::beast::get_lowest_layer(ws)
                                     .expires_never();
                                 // Set suggested timeout settings for the
@@ -199,31 +230,29 @@ main(int argc, char** argv)
                                 // WebSocket handshake. See
                                 // https://tools.ietf.org/html/rfc7230#section-5.4
 
-                                std::cout << "trying something" << std::endl;
-                                std::string hostUpd = host+ ':' + std::to_string(ep.port());
+                                std::string hostUpd =
+                                    host + ':' + std::to_string(ep.port());
                                 // Perform the websocket handshake
-                                ws.async_handshake(
-                                    host, "/", [this](auto ec) {
+                                ws.async_handshake(host, "/", [this](auto ec) {
                                     std::cout << ec << std::endl;
                                     std::cout << "handshook" << std::endl;
                                     connected = true;
-                                        cv.notify_all();
-                                    });
+                                    cv.notify_all();
+                                });
                             });
                     });
-
             }
 
             void
             start()
             {
                 std::unique_lock<std::mutex> lck(mtx);
-                cv.wait(lck,[this](){ return connected == true;});
-                
+                cv.wait(lck, [this]() { return connected == true; });
+
+                std::cout << requests[offset] << std::endl;
                 if (offset > requests.size())
                     return;
                 Json::StreamWriterBuilder writer;
-                std::cout << requests[offset] << std::endl;
                 ws.async_write(
                     net::buffer(Json::writeString(writer, requests[offset])),
                     [this](auto ec, auto size) { onWrite(ec, size); });
@@ -231,7 +260,6 @@ main(int argc, char** argv)
             void
             onWrite(boost::beast::error_code ec, size_t size)
             {
-                std::cout << ec << std::endl;
                 ws.async_read(readBuffer, [this](auto ec, auto size) {
                     onRead(ec, size);
                 });
@@ -261,10 +289,12 @@ main(int argc, char** argv)
                 */
                 beast::flat_buffer buf;
                 swap(buf, readBuffer);
-                ++counter;
+                uint32_t count = ++counter;
                 offset += incr;
                 if (offset >= requests.size())
                     return;
+                if(count % 100 == 0)
+                    std::cout << count << std::endl;
                 Json::StreamWriterBuilder writer;
                 ws.async_write(
                     net::buffer(Json::writeString(writer, requests[offset])),
@@ -283,9 +313,7 @@ main(int argc, char** argv)
         }
         std::optional<boost::asio::io_service::work> work;
         work.emplace(ioc);
-        std::thread iothread{[&ioc]() {
-                ioc.run();
-        }};
+        std::thread iothread{[&ioc]() { ioc.run(); }};
         std::cout << "made readers. starting" << std::endl;
         for (auto& reader : readers)
         {
