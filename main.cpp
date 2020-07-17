@@ -26,7 +26,7 @@ main(int argc, char** argv)
     try
     {
         // Check command line arguments.
-        if (argc != 5 and argc != 6)
+        if (argc < 7)
         {
             std::cerr << "Usage: websocket-client-sync <host> <port> \n"
                       << "Example:\n"
@@ -36,7 +36,7 @@ main(int argc, char** argv)
         }
         std::string host = argv[1];
         auto const port = argv[2];
-        size_t numTxns = std::atol(argv[3]);
+        size_t numRequests = std::atol(argv[3]);
         size_t numReaders = std::atol(argv[4]);
         bool readFromFile = false;
         if (argc == 6)
@@ -45,6 +45,10 @@ main(int argc, char** argv)
             readFromFile = f.good();
             f.close();
         }
+
+        bool tx = (argv[6][0] == 't');
+
+        bool verify = argc > 7;
 
         // The io_context is required for all I/O
         net::io_context ioc;
@@ -85,6 +89,7 @@ main(int argc, char** argv)
         request["ledger_index"] = "validated";
         std::vector<Json::Value> hashes;
 
+        std::vector<Json::Value> accounts;
         if (readFromFile)
         {
             std::ifstream f(argv[5]);
@@ -92,16 +97,19 @@ main(int argc, char** argv)
             {
                 std::string line;
                 std::getline(f, line);
-                if(line.empty())
+                if (line.empty())
                     continue;
-                line = line.substr(1, line.size()-2);
-                hashes.emplace_back(line);
+                line = line.substr(1, line.size() - 2);
+                if (tx)
+                    hashes.emplace_back(line);
+                else
+                    accounts.emplace_back(line);
             }
             f.close();
         }
         else
         {
-            while (hashes.size() < numTxns)
+            while (tx and hashes.size() < numRequests)
             {
                 // request["ledger_index"] = "validated";
 
@@ -139,23 +147,72 @@ main(int argc, char** argv)
                 }
                 std::cout << hashes.size() << std::endl;
             }
+
+            request["command"] = "ledger_data";
+            while (not tx and accounts.size() < numRequests)
+            {
+                Json::StreamWriterBuilder writer;
+                ws.write(net::buffer(Json::writeString(writer, request)));
+
+                beast::flat_buffer buffer;
+                ws.read(buffer);
+
+                Json::CharReaderBuilder builder;
+                Json::CharReader* reader{builder.newCharReader()};
+
+                Json::Value response;
+                const char* data =
+                    static_cast<const char*>(buffer.data().data());
+                const char* dataEnd = data + buffer.data().size();
+                reader->parse(data, dataEnd, &response, nullptr);
+
+                for (auto& jv : response["result"]["state"])
+                {
+                    if (jv["LedgerEntryType"] == "AccountRoot")
+                        accounts.push_back(jv["Account"]);
+                }
+                if (request["result"].isMember("marker"))
+                    request["marker"] = response["result"]["marker"];
+                else
+                    break;
+            }
         }
-        std::cout << "gathered " << hashes.size() << "txns" << std::endl;
+
+        std::cout << "gathered request data" << std::endl;
 
         std::ofstream myFile;
-        if(!readFromFile and argc > 5)
+        if (!readFromFile and argc > 5)
             myFile.open(argv[5]);
         std::vector<Json::Value> requests;
-        for (auto& tx : hashes)
+        if (tx)
         {
-            Json::Value req;
-            req["command"] = "tx";
-            req["transaction"] = tx;
-            requests.push_back(req);
-            if(!readFromFile and argc > 5)
-                myFile << tx << '\n';
+            for (auto& tx : hashes)
+            {
+                Json::Value req;
+                req["command"] = "tx";
+                req["transaction"] = tx;
+                requests.push_back(req);
+                if (!readFromFile and argc > 5)
+                    myFile << tx << '\n';
+            }
         }
-        if(myFile.is_open())
+        else
+        {
+            for (auto& a : accounts)
+            {
+                Json::Value req;
+                req["command"] = "account_info";
+                req["account"] = a;
+                requests.push_back(req);
+                if (!readFromFile and argc > 5)
+                    myFile << a << '\n';
+            }
+        }
+
+        if (requests.size() > numRequests)
+            requests.erase(requests.begin() + numRequests, requests.end());
+
+        if (myFile.is_open())
             myFile.close();
 
         struct Reader
@@ -171,6 +228,7 @@ main(int argc, char** argv)
             std::condition_variable cv;
             std::atomic_bool connected{false};
             tcp::resolver resolver;
+            bool verify;
             Reader(
                 size_t offset,
                 size_t incr,
@@ -178,7 +236,8 @@ main(int argc, char** argv)
                 std::string port,
                 std::vector<Json::Value>& requests,
                 net::io_context& ioc,
-                std::atomic_uint32_t& counter)
+                std::atomic_uint32_t& counter,
+                bool verify = false)
                 : offset(offset)
                 , incr(incr)
                 , requests(requests)
@@ -267,32 +326,33 @@ main(int argc, char** argv)
             void
             onRead(boost::beast::error_code ec, size_t size)
             {
-		    /*
-                std::cout << ec << std::endl;
+                if (verify)
+                {
+                    std::cout << ec << std::endl;
 
-                Json::CharReaderBuilder builder;
-                Json::CharReader* reader{builder.newCharReader()};
+                    Json::CharReaderBuilder builder;
+                    Json::CharReader* reader{builder.newCharReader()};
 
-                Json::Value response;
-                const char* data =
-                    static_cast<const char*>(readBuffer.data().data());
-                const char* dataEnd = data + readBuffer.data().size();
-                std::string raw{data, dataEnd};
-                std::string errs;
-                bool res = reader->parse(data, dataEnd, &response, &errs);
-                std::cout << errs << std::endl;
-                std::cout << raw << std::endl;
-                std::cout << response << std::endl;
-                assert(res);
-                assert(response["status"] == "success");
-		*/
+                    Json::Value response;
+                    const char* data =
+                        static_cast<const char*>(readBuffer.data().data());
+                    const char* dataEnd = data + readBuffer.data().size();
+                    std::string raw{data, dataEnd};
+                    std::string errs;
+                    bool res = reader->parse(data, dataEnd, &response, &errs);
+                    std::cout << errs << std::endl;
+                    std::cout << raw << std::endl;
+                    std::cout << response << std::endl;
+                    assert(res);
+                    assert(response["status"] == "success");
+                }
                 beast::flat_buffer buf;
                 swap(buf, readBuffer);
                 uint32_t count = ++counter;
                 offset += incr;
                 if (offset >= requests.size())
                     return;
-                if(count % 100 == 0)
+                if (count % 100 == 0)
                     std::cout << count << std::endl;
                 Json::StreamWriterBuilder writer;
                 ws.async_write(
@@ -308,7 +368,7 @@ main(int argc, char** argv)
         {
             std::cout << "making reader = " << i << std::endl;
             readers.push_back(std::make_shared<Reader>(
-                i, numReaders, host, port, requests, ioc, counter));
+                i, numReaders, host, port, requests, ioc, counter, verify));
         }
         std::optional<boost::asio::io_service::work> work;
         work.emplace(ioc);
