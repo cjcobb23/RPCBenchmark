@@ -39,11 +39,12 @@ main(int argc, char** argv)
         size_t numRequests = std::atol(argv[3]);
         size_t numReaders = std::atol(argv[4]);
         bool readFromFile = false;
-        if (argc == 6)
+        if (argc >= 6)
         {
             std::ifstream f(argv[5]);
             readFromFile = f.good();
             f.close();
+	    std::cout << readFromFile << std::endl;
         }
 
         bool tx = (argv[6][0] == 't');
@@ -245,6 +246,7 @@ main(int argc, char** argv)
                 , ws(ioc)
                 , counter(counter)
                 , resolver(ioc)
+		, verify(verify)
             {
                 // These objects perform our I/O
 
