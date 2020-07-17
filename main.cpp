@@ -95,7 +95,6 @@ main(int argc, char** argv)
                 if(line.empty())
                     continue;
                 line = line.substr(1, line.size()-2);
-                std::cout << line << std::endl;
                 hashes.emplace_back(line);
             }
             f.close();
@@ -145,7 +144,7 @@ main(int argc, char** argv)
 
         std::ofstream myFile;
         if(!readFromFile and argc > 5)
-            myFile.open("hashes.txt");
+            myFile.open(argv[5]);
         std::vector<Json::Value> requests;
         for (auto& tx : hashes)
         {
@@ -268,7 +267,7 @@ main(int argc, char** argv)
             void
             onRead(boost::beast::error_code ec, size_t size)
             {
-                /*
+		    /*
                 std::cout << ec << std::endl;
 
                 Json::CharReaderBuilder builder;
@@ -286,7 +285,7 @@ main(int argc, char** argv)
                 std::cout << response << std::endl;
                 assert(res);
                 assert(response["status"] == "success");
-                */
+		*/
                 beast::flat_buffer buf;
                 swap(buf, readBuffer);
                 uint32_t count = ++counter;
@@ -320,7 +319,6 @@ main(int argc, char** argv)
             reader->start();
         }
         work.reset();
-        assert(counter == 0);
 
         auto start = std::chrono::system_clock::now();
         iothread.join();
