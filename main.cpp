@@ -172,7 +172,9 @@ main(int argc, char** argv)
                     if (jv["LedgerEntryType"] == "AccountRoot")
                         accounts.push_back(jv["Account"]);
                 }
-                if (request["result"].isMember("marker"))
+
+		std::cout << accounts.size() << std::endl;
+                if (response["result"].isMember("marker"))
                     request["marker"] = response["result"]["marker"];
                 else
                     break;
