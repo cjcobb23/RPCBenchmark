@@ -39,7 +39,7 @@ main(int argc, char** argv)
         size_t numRequests = std::atol(argv[3]);
         size_t numReaders = std::atol(argv[4]);
         bool readFromFile = false;
-        if (argc == 6)
+        if (argc > 6)
         {
             std::ifstream f(argv[5]);
             readFromFile = f.good();
@@ -47,6 +47,8 @@ main(int argc, char** argv)
         }
 
         bool tx = (argv[6][0] == 't');
+        bool account_info = (argv[6][0] == 'a');
+        bool ledgers = (argv[6][0] == 'l');
 
         bool verify = argc > 7;
 
@@ -59,12 +61,10 @@ main(int argc, char** argv)
 
         // Look up the domain name
         auto const results = resolver.resolve(host, port);
-        std::cout << "resolved" << std::endl;
 
         // Make the connection on the IP address we get from a lookup
         auto ep = net::connect(ws.next_layer(), results);
 
-        std::cout << "connected" << std::endl;
         // Update the host_ string. This will provide the value of the
         // Host HTTP header during the WebSocket handshake.
         // See https://tools.ietf.org/html/rfc7230#section-5.4
@@ -81,7 +81,6 @@ main(int argc, char** argv)
 
         // Perform the websocket handshake
         ws.handshake(updatedHost, "/");
-        std::cout << "shook hands" << std::endl;
 
         Json::Value request;
         request["command"] = "ledger";
@@ -90,7 +89,7 @@ main(int argc, char** argv)
         std::vector<Json::Value> hashes;
 
         std::vector<Json::Value> accounts;
-        if (readFromFile)
+        if (readFromFile and not ledgers)
         {
             std::ifstream f(argv[5]);
             while (f.good())
@@ -102,7 +101,7 @@ main(int argc, char** argv)
                 line = line.substr(1, line.size() - 2);
                 if (tx)
                     hashes.emplace_back(line);
-                else
+                else if(account_info)
                     accounts.emplace_back(line);
             }
             f.close();
@@ -117,7 +116,6 @@ main(int argc, char** argv)
 
                 // Send the message
                 ws.write(net::buffer(Json::writeString(writer, request)));
-                std::cout << "sent message" << std::endl;
 
                 // This buffer will hold the incoming message
                 beast::flat_buffer buffer;
@@ -145,11 +143,10 @@ main(int argc, char** argv)
                 {
                     hashes.push_back(jv);
                 }
-                std::cout << hashes.size() << std::endl;
             }
 
             request["command"] = "ledger_data";
-            while (not tx and accounts.size() < numRequests)
+            while (account_info and accounts.size() < numRequests)
             {
                 Json::StreamWriterBuilder writer;
                 ws.write(net::buffer(Json::writeString(writer, request)));
@@ -171,14 +168,18 @@ main(int argc, char** argv)
                     if (jv["LedgerEntryType"] == "AccountRoot")
                         accounts.push_back(jv["Account"]);
                 }
-                if (request["result"].isMember("marker"))
+//                std::cout << response << std::endl;
+                if (response["result"].isMember("marker"))
                     request["marker"] = response["result"]["marker"];
                 else
                     break;
             }
+
         }
 
         std::cout << "gathered request data" << std::endl;
+        std::cout << "accounts " << accounts.size() << std::endl;
+        std::cout << "tx " << hashes.size() << std::endl;
 
         std::ofstream myFile;
         if (!readFromFile and argc > 5)
@@ -196,7 +197,7 @@ main(int argc, char** argv)
                     myFile << tx << '\n';
             }
         }
-        else
+        else if(account_info)
         {
             for (auto& a : accounts)
             {
@@ -208,9 +209,22 @@ main(int argc, char** argv)
                     myFile << a << '\n';
             }
         }
+        else if(ledgers)
+        {
+            for(size_t i = 0; i < numRequests; ++i)
+            {
+                Json::Value req;
+                req["command"] = "ledger";
+                req["transactions"] = "true";
+                req["expand"] = "true";
+                requests.push_back(req);
+            }
+        }
 
+        std::cout << "requests = " << requests.size() << std::endl;
         if (requests.size() > numRequests)
             requests.erase(requests.begin() + numRequests, requests.end());
+
 
         if (myFile.is_open())
             myFile.close();
@@ -245,21 +259,17 @@ main(int argc, char** argv)
                 , ws(ioc)
                 , counter(counter)
                 , resolver(ioc)
+                , verify(verify)
             {
                 // These objects perform our I/O
 
-                std::cout << "starting callback" << std::endl;
 
                 resolver.async_resolve(
                     host, port, [this, host](auto ec, auto results) {
-                        std::cout << ec << std::endl;
-                        std::cout << "resolved" << std::endl;
                         boost::beast::get_lowest_layer(ws).expires_after(
                             std::chrono::seconds(30));
                         boost::beast::get_lowest_layer(ws).async_connect(
                             results, [this, host](auto ec, auto ep) {
-                                std::cout << ec << std::endl;
-                                std::cout << "connected" << std::endl;
                                 boost::beast::get_lowest_layer(ws)
                                     .expires_never();
                                 // Set suggested timeout settings for the
@@ -292,8 +302,6 @@ main(int argc, char** argv)
                                     host + ':' + std::to_string(ep.port());
                                 // Perform the websocket handshake
                                 ws.async_handshake(host, "/", [this](auto ec) {
-                                    std::cout << ec << std::endl;
-                                    std::cout << "handshook" << std::endl;
                                     connected = true;
                                     cv.notify_all();
                                 });
@@ -307,7 +315,6 @@ main(int argc, char** argv)
                 std::unique_lock<std::mutex> lck(mtx);
                 cv.wait(lck, [this]() { return connected == true; });
 
-                std::cout << requests[offset] << std::endl;
                 if (offset > requests.size())
                     return;
                 Json::StreamWriterBuilder writer;
@@ -352,7 +359,7 @@ main(int argc, char** argv)
                 offset += incr;
                 if (offset >= requests.size())
                     return;
-                if (count % 100 == 0)
+                if (count % 1000 == 0)
                     std::cout << count << std::endl;
                 Json::StreamWriterBuilder writer;
                 ws.async_write(
@@ -366,14 +373,12 @@ main(int argc, char** argv)
 
         for (size_t i = 0; i < numReaders; ++i)
         {
-            std::cout << "making reader = " << i << std::endl;
             readers.push_back(std::make_shared<Reader>(
                 i, numReaders, host, port, requests, ioc, counter, verify));
         }
         std::optional<boost::asio::io_service::work> work;
         work.emplace(ioc);
         std::thread iothread{[&ioc]() { ioc.run(); }};
-        std::cout << "made readers. starting" << std::endl;
         for (auto& reader : readers)
         {
             reader->start();
